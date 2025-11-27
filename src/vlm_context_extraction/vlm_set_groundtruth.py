@@ -1,0 +1,1 @@
+#Create a script to set the groundtruth for the VLM model.
