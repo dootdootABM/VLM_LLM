@@ -18,12 +18,8 @@ h5py
 Pillow
 gunicorn
 pyserial
-RPi.GPIO
-python-vlc
+# RPi.GPIO removed (platform-specific)
+# python-vlc removed (platform-specific)
 gevent
 setuptools<58
-evdev
-# ===== VLM & Ollama Integration =====
-# Note: Ollama must be installed separately
-# curl -fsSL https://ollama.ai/install.sh | sh
-# ollama pull qwen2.5vl:3b-q8_0
+# evdev removed (Linux-specific)

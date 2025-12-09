@@ -1,46 +1,62 @@
 from launch import LaunchDescription
 from launch_ros.actions import Node
 
-
 def generate_launch_description():
     return LaunchDescription(
         [
+            # Feature Extraction Nodes
             Node(
                 package="drowsiness_detection_pkg",
-                executable="camera_node",
-                name="camera_node",
+                executable="camera_mediapipe_node",
+                name="camera_mediapipe_node",
                 output="screen",
             ),
             Node(
                 package="drowsiness_detection_pkg",
-                executable="mediapipe_node",
-                name="mediapipe_node",
+                executable="carla_manual_control",
+                name="carla_manual_control",
                 output="screen",
             ),
             Node(
                 package="drowsiness_detection_pkg",
-                executable="carla_node",
-                name="carla_node",
+                executable="hybrid_vlm_node",
+                name="hybrid_vlm_node",
+                output="screen",
+            ),
+            # ML Classification Nodes
+            Node(
+                package="drowsiness_detection_pkg",
+                executable="camera_ml_node",
+                name="camera_ml_node",
                 output="screen",
             ),
             Node(
                 package="drowsiness_detection_pkg",
-                executable="driver_assistance_node",
-                name="driver_assistance_node",
+                executable="carla_ml_node",
+                name="carla_ml_node",
                 output="screen",
+            ),
+            # Decision & Reasoning Nodes
+            Node(
+                package="drowsiness_detection_pkg",
+                executable="integrated_llm_node",
+                name="integrated_llm_node",
+                output="screen",
+                parameters=[
+                    {"driver_id": "maria"},
+                    {"ollama_endpoint": "http://localhost:11434"},
+                ],
             ),
             Node(
                 package="drowsiness_detection_pkg",
-                executable="steering_wheel_ffb_node",
-                name="steering_wheel_ffb_node",
+                executable="drowsiness_alert_dispatcher",
+                name="drowsiness_alert_dispatcher",
                 output="screen",
+                parameters=[
+                    {"driver_id": "maria"},
+                ],
             ),
-            Node(
-                package="drowsiness_detection_pkg",
-                executable="steering_vibration_node",
-                name="steering_vibration_node",
-                output="screen",
-            ),
+            # Actuator Nodes
             Node(
                 package="drowsiness_detection_pkg",
                 executable="speaker_node",
@@ -53,5 +69,12 @@ def generate_launch_description():
                 name="fan_node",
                 output="screen",
             ),
+            Node(
+                package="drowsiness_detection_pkg",
+                executable="steering_node",
+                name="steering_node",
+                output="screen",
+            ),
         ]
     )
+

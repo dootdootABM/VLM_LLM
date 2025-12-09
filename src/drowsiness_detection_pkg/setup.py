@@ -2,7 +2,9 @@ from setuptools import find_packages, setup
 import os
 from glob import glob
 
+
 package_name = "drowsiness_detection_pkg"
+
 
 setup(
     name=package_name,
@@ -51,6 +53,9 @@ setup(
             "fan_node = drowsiness_detection.bot.controls.fan_node:main",
             "steering_wheel_ffb_node = drowsiness_detection.bot.controls.steering_wheel_autocenter:main",
             "vehicle_info_node = drowsiness_detection.carla.vehicle_info:main",
+            "hybrid_vlm_node = drowsiness_detection.VLM.hybrid_vlm_node:main",
+            "ml_aggregator_node = drowsiness_detection.ml_nodes.ml_aggregator_node:main",
+
         ],
     },
 )
