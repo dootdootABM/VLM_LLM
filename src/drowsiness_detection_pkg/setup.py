@@ -2,9 +2,7 @@ from setuptools import find_packages, setup
 import os
 from glob import glob
 
-
 package_name = "drowsiness_detection_pkg"
-
 
 setup(
     name=package_name,
@@ -44,18 +42,30 @@ setup(
     license="TODO: License declaration",
     entry_points={
         "console_scripts": [
-            "mediapipe_node = drowsiness_detection.camera.camera_mediapipe_node:main",
-            "carla_node = drowsiness_detection.carla.carla_manual_control:main",
-            "driver_assistance_node = drowsiness_detection.main:main",
-            "drowsiness_gui = drowsiness_detection.labelling.app_v2:main",
-            "steering_vibration_node = drowsiness_detection.bot.controls.steering_node:main",
+            # FEATURE EXTRACTION
+            "camera_mediapipe_node = drowsiness_detection.camera.camera_mediapipe_node:main",
+            "carla_manual_control = drowsiness_detection.carla.carla_manual_control:main",
+            "hybrid_vlm_node = drowsiness_detection.VLM.hybrid_vlm_node:main",
+
+            # ML CLASSIFICATION
+            "camera_ml_node = drowsiness_detection.ml_nodes.camera_ml_node:main",
+            "carla_ml_node = drowsiness_detection.ml_nodes.carla_ml_node:main",
+
+            # CORE DECISION & DISPATCH
+            "integrated_llm_node = drowsiness_detection.bot.integrated_llm_node:main",
+            "drowsiness_alert_dispatcher = drowsiness_detection.bot.drowsiness_alert_dispatcher:main",
+
+            # ACTUATORS
             "speaker_node = drowsiness_detection.bot.controls.speaker_node:main",
             "fan_node = drowsiness_detection.bot.controls.fan_node:main",
+            "steering_node = drowsiness_detection.bot.controls.steering_node:main",
+
+            # OPTIONAL / LEGACY
+            "driver_assistance_node = drowsiness_detection.main:main",
+            "drowsiness_gui = drowsiness_detection.labelling.app_v2:main",
             "steering_wheel_ffb_node = drowsiness_detection.bot.controls.steering_wheel_autocenter:main",
             "vehicle_info_node = drowsiness_detection.carla.vehicle_info:main",
-            "hybrid_vlm_node = drowsiness_detection.VLM.hybrid_vlm_node:main",
             "ml_aggregator_node = drowsiness_detection.ml_nodes.ml_aggregator_node:main",
-
         ],
     },
 )
