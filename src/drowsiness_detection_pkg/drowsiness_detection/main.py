@@ -1,9 +1,24 @@
 #!/usr/bin/env python3
+"""
+DriverAssistanceNode - Data Collection & Annotation Module
+
+Purpose: Collect sensor data, compute metrics, and manage human annotations
+         for building ground truth datasets.
+
+This is a COMPLEMENTARY node to the LLM safety system.
+It can run in parallel with [138] integrated_llm_node and [139] drowsiness_alert_dispatcher
+for data collection and validation purposes.
+
+Usage:
+    ros2 run drowsiness_detection_pkg driver_assistance_node --ros-args -p driver_id:=maria
+"""
+
 import os
 import csv
 import cv2
 import threading
 from collections import deque
+from pathlib import Path
 
 import rclpy
 from rclpy.node import Node
@@ -27,12 +42,12 @@ from drowsiness_detection.camera.utils import (
 )
 
 
-# -------------------------------------------------------------------------
+# =========================================================================
 # CSV save utility
-# -------------------------------------------------------------------------
+# =========================================================================
 def save_to_csv(window_id, window_data, labels_dict, driver_id="driver_1"):
     """Append metrics and labels for each window to a CSV file."""
-    base_folder = "drowsiness_data"
+    base_folder = os.path.expanduser("~/DROWSINESS_DETECTION/drowsiness_data")
     driver_folder = os.path.join(base_folder, driver_id)
     os.makedirs(driver_folder, exist_ok=True)
     csv_path = os.path.join(driver_folder, "session_metrics.csv")
@@ -59,8 +74,12 @@ def save_to_csv(window_id, window_data, labels_dict, driver_id="driver_1"):
         row[f"{prefix}_voice_feedback"] = lbl.get("voice_feedback", "")
         row[f"{prefix}_submission_type"] = lbl.get("submission_type", "")
         row[f"{prefix}_action_fan"] = int(bool(lbl.get("action_fan", False)))
-        row[f"{prefix}_action_voice_command"] = int(bool(lbl.get("action_voice_command", False)))
-        row[f"{prefix}_action_steering_vibration"] = int(bool(lbl.get("action_steering_vibration", False)))
+        row[f"{prefix}_action_voice_command"] = int(
+            bool(lbl.get("action_voice_command", False))
+        )
+        row[f"{prefix}_action_steering_vibration"] = int(
+            bool(lbl.get("action_steering_vibration", False))
+        )
         row[f"{prefix}_action_save_video"] = int(bool(lbl.get("action_save_video", False)))
 
     if not os.path.exists(csv_path):
@@ -89,90 +108,168 @@ def save_to_csv(window_id, window_data, labels_dict, driver_id="driver_1"):
             writer.writerow(row)
 
 
-# -------------------------------------------------------------------------
+# =========================================================================
 # Main node
-# -------------------------------------------------------------------------
+# =========================================================================
 class DriverAssistanceNode(Node):
+    """
+    Data collection and annotation node.
+    
+    Subscribes to:
+    - /ear_mar (EarMarValue) - Eye aspect ratio and mouth aspect ratio
+    - /carla/hero/vehicle_control_cmd (CarlaEgoVehicleControl) - Steering angle
+    - /carla/lane_offset (LanePosition) - Lane deviation
+    - /camera/image_raw (Image) - Camera frames for video recording
+    - /driver_assistance/combined_annotations (CombinedAnnotations) - Human labels
+    
+    Publishes to:
+    - /driver_assistance/window_phase (Float32MultiArray) - Current window phase and timing
+    
+    Services:
+    - store_labels (StoreLabels) - Receive human annotations
+    """
+
     def __init__(self):
         super().__init__("driver_assistance_node")
 
-        # declare driver_id
+        # ===================================================================
+        # PARAMETERS
+        # ===================================================================
         self.declare_parameter("driver_id", "maria")
         self.driver_id = self.get_parameter("driver_id").value
-        
-        # Parameters
+
         self.declare_parameter("EAR_Threshold", 0.2)
         self.declare_parameter("MAR_Threshold", 0.4)
         self.declare_parameter("blink_threshold", 3)
         self.declare_parameter("Yawning_threshold", 4)
+
         self.ear_threshold = self.get_parameter("EAR_Threshold").value
         self.mar_threshold = self.get_parameter("MAR_Threshold").value
         self.ear_consec_frames = self.get_parameter("blink_threshold").value
         self.mar_consec_time = self.get_parameter("Yawning_threshold").value
 
-        # Data buffers
+        # ===================================================================
+        # DATA BUFFERS
+        # ===================================================================
         self.ear_buffer = deque(maxlen=2000)
         self.mar_buffer = deque(maxlen=2000)
         self.steering_buffer = deque(maxlen=2000)
         self.lane_offset_buffer = deque(maxlen=2000)
         self.buffer_lock = threading.Lock()
 
-        # Window timing
-        self.window_duration = 60.0
-        self.label_collection_time = 10.0
+        # ===================================================================
+        # WINDOW TIMING
+        # ===================================================================
+        self.window_duration = 60.0  # seconds
+        self.label_collection_time = 10.0  # seconds
         self.current_window_id = 0
         self.last_window_end_time = self.get_clock().now().nanoseconds / 1e9
 
-        # Video handling
+        # ===================================================================
+        # VIDEO HANDLING
+        # ===================================================================
         self.bridge = CvBridge()
         self.video_writer = None
         self.current_video_path = None
         self.finished_video_paths = {}  # window_id -> video path
-        self.video_base_dir = os.path.join("drowsiness_data", self.driver_id, "videos")
+        
+        video_base_dir = os.path.expanduser("~/DROWSINESS_DETECTION/drowsiness_data")
+        self.video_base_dir = os.path.join(video_base_dir, self.driver_id, "videos")
         os.makedirs(self.video_base_dir, exist_ok=True)
 
-        # ROS I/O
-        self.create_subscription(EarMarValue, "/ear_mar", self.ear_mar_callback, qos_profile_sensor_data)
-        self.create_subscription(CarlaEgoVehicleControl, "/carla/hero/vehicle_control_cmd", self.steering_callback, 10)
-        self.create_subscription(LanePosition, "/carla/lane_offset", self.lane_offset_callback, qos_profile_sensor_data)
-        self.create_subscription(Image, "/camera/image_raw", self.cb_camera, qos_profile_sensor_data)
-        self.create_subscription(CombinedAnnotations, "/driver_assistance/combined_annotations", self.combined_annotations_callback, 10)
-        self.store_labels_srv = self.create_service(StoreLabels, "store_labels", self.handle_store_labels)
-        self.window_phase_pub = self.create_publisher(Float32MultiArray, "/driver_assistance/window_phase", 10)
+        # ===================================================================
+        # ROS2 SUBSCRIBERS
+        # ===================================================================
+        self.create_subscription(
+            EarMarValue,
+            "/ear_mar",
+            self.ear_mar_callback,
+            qos_profile_sensor_data,
+        )
+        self.create_subscription(
+            CarlaEgoVehicleControl,
+            "/carla/hero/vehicle_control_cmd",
+            self.steering_callback,
+            10,
+        )
+        self.create_subscription(
+            LanePosition,
+            "/carla/lane_offset",
+            self.lane_offset_callback,
+            qos_profile_sensor_data,
+        )
+        self.create_subscription(
+            Image,
+            "/camera/image_raw",
+            self.cb_camera,
+            qos_profile_sensor_data,
+        )
+        self.create_subscription(
+            CombinedAnnotations,
+            "/driver_assistance/combined_annotations",
+            self.combined_annotations_callback,
+            10,
+        )
+
+        # ===================================================================
+        # ROS2 SERVICE & PUBLISHER
+        # ===================================================================
+        self.store_labels_srv = self.create_service(
+            StoreLabels,
+            "store_labels",
+            self.handle_store_labels,
+        )
+        self.window_phase_pub = self.create_publisher(
+            Float32MultiArray,
+            "/driver_assistance/window_phase",
+            10,
+        )
+
+        # ===================================================================
+        # STATE TRACKING
+        # ===================================================================
+        self.combined_annotations = {}  # window_id -> CombinedAnnotations
+        self.pending_metrics = {}  # window_id -> computed window data
+
+        # ===================================================================
+        # TIMER FOR WINDOW MANAGEMENT
+        # ===================================================================
         self.create_timer(0.1, self.update_window_phase)
 
-        self.combined_annotations = {}  # window_id -> CombinedAnnotations
-        self.pending_metrics = {}       # window_id -> computed window data
+        self.get_logger().info(
+            f"✅ Driver Assistance Node started\n"
+            f"   Driver ID: {self.driver_id}\n"
+            f"   Video directory: {self.video_base_dir}\n"
+            f"   Window duration: {self.window_duration}s"
+        )
 
-        self.get_logger().info("Driver Assistance Node started.")
-
-        # Prepare first window recording (writer starts on first frame)
+        # Prepare first window recording
         self.start_new_video_writer()
 
-    # ---------------------------------------------------------------------
-    # Video handling
-    # ---------------------------------------------------------------------
+    # =====================================================================
+    # VIDEO HANDLING
+    # =====================================================================
     def start_new_video_writer(self):
-        """Prepare a new video file for the current window. The writer will be created on the first frame."""
+        """Prepare a new video file for the current window."""
         filename = f"window_{self.current_window_id}.mp4"
         self.current_video_path = os.path.join(self.video_base_dir, filename)
         self.video_writer = None
-        self.get_logger().info(f"[VIDEO] Prepared recording for {self.current_video_path}")
+        self.get_logger().debug(f"[VIDEO] Prepared recording for {self.current_video_path}")
 
     def _release_writer_only(self):
-        """Release the current writer without deleting any file and without clearing path."""
+        """Release the current writer without deleting any file."""
         try:
             if self.video_writer:
                 self.video_writer.release()
                 self.video_writer = None
         except Exception as e:
-            self.get_logger().error(f"Video release error: {e}")
+            self.get_logger().error(f"❌ Video release error: {e}")
 
-    # ---------------------------------------------------------------------
-    # Subscribers and service
-    # ---------------------------------------------------------------------
+    # =====================================================================
+    # ROS2 CALLBACKS
+    # =====================================================================
     def cb_camera(self, msg: Image):
-        """Start the writer on the first frame (to match resolution), then write frames continuously."""
+        """Start video writer on first frame, then write all frames."""
         try:
             cv_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding="rgb8")
             if self.video_writer is None and self.current_video_path:
@@ -183,33 +280,40 @@ class DriverAssistanceNode(Node):
                     30,
                     (w, h),
                 )
-                self.get_logger().info(f"[VIDEO] Recording started: {self.current_video_path} ({w}x{h})")
+                self.get_logger().info(
+                    f"[VIDEO] Recording started: {self.current_video_path} ({w}x{h})"
+                )
             if self.video_writer:
                 self.video_writer.write(cv_img)
         except Exception as e:
-            self.get_logger().error(f"Camera callback error: {e}")
+            self.get_logger().error(f"❌ Camera callback error: {e}")
 
     def ear_mar_callback(self, msg: EarMarValue):
+        """Buffer EAR and MAR values with timestamps."""
         ts = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         with self.buffer_lock:
             self.ear_buffer.append((ts, float(msg.ear_value)))
             self.mar_buffer.append((ts, float(msg.mar_value)))
 
     def steering_callback(self, msg: CarlaEgoVehicleControl):
+        """Buffer steering angle values."""
         ts = self.get_clock().now().nanoseconds / 1e9
         with self.buffer_lock:
             self.steering_buffer.append((ts, float(msg.steer)))
 
     def lane_offset_callback(self, msg: LanePosition):
+        """Buffer lane offset values."""
         ts = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         with self.buffer_lock:
             self.lane_offset_buffer.append((ts, float(msg.lane_offset)))
 
     def combined_annotations_callback(self, msg: CombinedAnnotations):
+        """Receive combined annotations from human annotators."""
         with self.buffer_lock:
             self.combined_annotations[msg.window_id] = msg
 
     def handle_store_labels(self, request, response):
+        """Service handler for storing labels."""
         window_id = request.window_id
         combined = CombinedAnnotations()
         combined.window_id = window_id
@@ -219,14 +323,14 @@ class DriverAssistanceNode(Node):
             self.combined_annotations[window_id] = combined
         self.try_merge_and_save(window_id)
         response.success = True
-        response.message = f"Stored labels for window {window_id}"
+        response.message = f"✅ Stored labels for window {window_id}"
         return response
 
-    # ---------------------------------------------------------------------
-    # Window lifecycle
-    # ---------------------------------------------------------------------
+    # =====================================================================
+    # WINDOW LIFECYCLE
+    # =====================================================================
     def update_window_phase(self):
-        """Publish phase and remaining time; trigger window rollover at 0."""
+        """Publish phase and remaining time; trigger window rollover."""
         now_ros = self.get_clock().now().nanoseconds / 1e9
         time_in_current_window = now_ros - self.last_window_end_time
         remaining_time = max(0.0, self.window_duration - time_in_current_window)
@@ -240,30 +344,27 @@ class DriverAssistanceNode(Node):
             self.process_completed_window()
 
     def process_completed_window(self):
-        """
-        On window end:
-          1) Finalize the current window's video file (release writer).
-          2) Advance window bookkeeping and immediately prepare next window recording.
-          3) Launch metrics computation in a background thread to keep UI responsive.
-        """
+        """Process window completion: finalize video and queue metrics computation."""
         window_start_time = self.last_window_end_time
         window_id = self.current_window_id
 
-        self.get_logger().info(f"Window {window_id} complete. Computing metrics (async)...")
+        self.get_logger().info(f"⏱️ Window {window_id} complete. Computing metrics...")
 
         # Finalize current window video
         finished_path = self.current_video_path
         self._release_writer_only()
         if finished_path:
             self.finished_video_paths[window_id] = finished_path
-            self.get_logger().info(f"[VIDEO] Finalized file for window {window_id}: {finished_path}")
+            self.get_logger().debug(
+                f"[VIDEO] Finalized file for window {window_id}: {finished_path}"
+            )
 
         # Advance window and start next recording immediately
         self.current_window_id += 1
         self.last_window_end_time += self.window_duration
         self.start_new_video_writer()
 
-        # Compute metrics asynchronously to avoid blocking the timer/UI
+        # Compute metrics asynchronously
         threading.Thread(
             target=self._async_compute_and_merge,
             args=(window_id, window_start_time),
@@ -271,7 +372,7 @@ class DriverAssistanceNode(Node):
         ).start()
 
     def _async_compute_and_merge(self, window_id, window_start_time):
-        """Compute metrics in a background thread and trigger merge/save when ready."""
+        """Compute metrics in background thread and trigger save."""
         try:
             window_data = self.compute_metrics(window_start_time)
             if window_data:
@@ -279,34 +380,65 @@ class DriverAssistanceNode(Node):
                     self.pending_metrics[window_id] = window_data
                 self.try_merge_and_save(window_id)
             else:
-                self.get_logger().warn(f"[ASYNC] No valid metrics computed for window {window_id}.")
+                self.get_logger().warn(f"⚠️ No valid metrics for window {window_id}")
         except Exception as e:
-            self.get_logger().error(f"[ASYNC] Metric computation failed for window {window_id}: {e}")
+            self.get_logger().error(
+                f"❌ Metric computation failed for window {window_id}: {e}"
+            )
 
-    # ---------------------------------------------------------------------
-    # Metrics and merge
-    # ---------------------------------------------------------------------
+    # =====================================================================
+    # METRICS COMPUTATION
+    # =====================================================================
     def compute_metrics(self, window_start_time):
+        """Compute all metrics for a window."""
         end_time = window_start_time + self.window_duration
 
         def robust_fps(ts):
+            """Compute FPS robustly using median delta."""
             if len(ts) < 2:
                 return 0.0
-            dts = [ts[i + 1] - ts[i] for i in range(len(ts) - 1) if ts[i + 1] > ts[i]] # calculate deltas
+            dts = [
+                ts[i + 1] - ts[i]
+                for i in range(len(ts) - 1)
+                if ts[i + 1] > ts[i]
+            ]
             if not dts:
                 return 0.0
             dts.sort()
-            med_dt = dts[len(dts) // 2] # calculate median
+            med_dt = dts[len(dts) // 2]
             return 1.0 / med_dt if med_dt > 0 else 0.0
 
         with self.buffer_lock:
-            ear_samples = [(t, v) for t, v in self.ear_buffer if window_start_time <= t < end_time]
-            mar_samples = [(t, v) for t, v in self.mar_buffer if window_start_time <= t < end_time]
-            steering_samples = [(t, v) for t, v in self.steering_buffer if window_start_time <= t < end_time]
-            lane_samples = [(t, v) for t, v in self.lane_offset_buffer if window_start_time <= t < end_time]
+            ear_samples = [
+                (t, v)
+                for t, v in self.ear_buffer
+                if window_start_time <= t < end_time
+            ]
+            mar_samples = [
+                (t, v)
+                for t, v in self.mar_buffer
+                if window_start_time <= t < end_time
+            ]
+            steering_samples = [
+                (t, v)
+                for t, v in self.steering_buffer
+                if window_start_time <= t < end_time
+            ]
+            lane_samples = [
+                (t, v)
+                for t, v in self.lane_offset_buffer
+                if window_start_time <= t < end_time
+            ]
 
-        if not ear_samples or not mar_samples or not steering_samples or not lane_samples:
-            self.get_logger().warn(f"Insufficient data for window {self.current_window_id}")
+        if (
+            not ear_samples
+            or not mar_samples
+            or not steering_samples
+            or not lane_samples
+        ):
+            self.get_logger().warn(
+                f"⚠️ Insufficient data for window {self.current_window_id}"
+            )
             return None
 
         ear_ts, ear_vals = zip(*ear_samples)
@@ -356,9 +488,16 @@ class DriverAssistanceNode(Node):
         }
         return {"metrics": metrics, "raw_data": raw_data}
 
+    # =====================================================================
+    # DATA MERGE & SAVE
+    # =====================================================================
     def try_merge_and_save(self, window_id):
+        """Merge metrics with annotations and save to CSV."""
         with self.buffer_lock:
-            if window_id not in self.pending_metrics or window_id not in self.combined_annotations:
+            if (
+                window_id not in self.pending_metrics
+                or window_id not in self.combined_annotations
+            ):
                 return
             window_data = self.pending_metrics.pop(window_id)
             combined = self.combined_annotations.pop(window_id)
@@ -373,62 +512,66 @@ class DriverAssistanceNode(Node):
                 "notes": ann.notes,
                 "voice_feedback": ann.voice_feedback,
                 "submission_type": ann.submission_type,
-                # "auto_submitted": ann.auto_submitted,
-                # "is_flagged": ann.is_flagged,
                 "action_fan": ann.action_fan,
                 "action_voice_command": ann.action_voice_command,
                 "action_steering_vibration": ann.action_steering_vibration,
                 "action_save_video": ann.action_save_video,
             }
 
-        # Conflict if annotators chose different non-empty levels
+        # Detect conflict
         conflict = len({lvl for lvl in drowsiness_levels if lvl}) > 1
 
-        # Persist metrics and labels
+        # Save metrics to CSV
         save_to_csv(window_id, window_data, labels_dict, driver_id=self.driver_id)
 
-        # Decide video retention and explain why
+        # Decide video retention
         keep_video = conflict or save_video_requested
         if keep_video:
             if conflict and save_video_requested:
-                reason = "conflict between annotators and annotator save request"
+                reason = "conflict + save request"
             elif conflict:
                 reason = "conflict between annotators"
             else:
                 reason = "annotator save request"
-            self.get_logger().info(f"[VIDEO] Keeping video for window {window_id} due to {reason}.")
+            self.get_logger().info(f"[VIDEO] Keeping video for window {window_id}: {reason}")
         else:
-            reason = "no conflict and no save request"
-            self.get_logger().info(f"[VIDEO] Deleting video for window {window_id} ({reason}).")
+            reason = "no conflict, no save request"
+            self.get_logger().info(f"[VIDEO] Deleting video for window {window_id}: {reason}")
 
-        # Finalize the correct file for this window
+        # Finalize video file
         path = self.finished_video_paths.pop(window_id, None)
         if path:
             try:
                 if keep_video:
-                    self.get_logger().info(f"Kept video: {path}")
+                    self.get_logger().info(f"✅ Kept video: {path}")
                 else:
                     if os.path.exists(path):
                         os.remove(path)
-                        self.get_logger().info(f"Deleted video: {path}")
+                        self.get_logger().info(f"🗑️ Deleted video: {path}")
             except Exception as e:
-                self.get_logger().error(f"Video finalize error for window {window_id}: {e}")
+                self.get_logger().error(f"❌ Video finalize error for window {window_id}: {e}")
         else:
-            self.get_logger().warn(f"[VIDEO] No recorded file path found for window {window_id}. Nothing to keep/delete.")
+            self.get_logger().warn(f"⚠️ No recorded file for window {window_id}")
 
-        self.get_logger().info(f"[MERGE] Window {window_id} processed. Video kept: {keep_video} ({reason}).")
+        self.get_logger().info(
+            f"✅ Window {window_id} saved. Video kept: {keep_video} ({reason})"
+        )
 
 
-# -------------------------------------------------------------------------
+# =========================================================================
+# MAIN
+# =========================================================================
 def main(args=None):
+    """Entry point for the node."""
     rclpy.init(args=args)
     node = DriverAssistanceNode()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        pass
-    node.destroy_node()
-    rclpy.shutdown()
+        node.get_logger().info("Shutting down Driver Assistance Node...")
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == "__main__":
