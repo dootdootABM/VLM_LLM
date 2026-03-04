@@ -35,8 +35,8 @@ class IntegratedSafetyCriticalLLMNode(Node):
 
 
 
-    def _init_(self):
-        super()._init_("integrated_safety_critical_llm_node")
+    def __init__(self):
+        super().__init__("integrated_safety_critical_llm_node")
 
 
 
@@ -106,7 +106,7 @@ class IntegratedSafetyCriticalLLMNode(Node):
         self._init_ollama()
         
         # === Timer for 1-minute LLM reasoning (triggered by 60s window) ===
-        self.create_timer(60.0, self.reason_on_timer)
+        self.create_timer(5.0, self.reason_on_timer)
 
 
 
@@ -424,7 +424,7 @@ RESPOND WITH JSON ONLY:"""
             
             # Find JSON
             json_match = re.search(
-                r'\{[^{}]"final_state"[^{}]"intervention_action"[^{}]*\}',
+                r'\{.*\}',
                 text_output,
                 re.DOTALL
             )
@@ -505,5 +505,5 @@ def main(args=None):
 
 
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     main()
